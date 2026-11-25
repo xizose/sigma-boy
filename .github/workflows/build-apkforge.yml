@@ -690,7 +690,10 @@ jobs:
                               val old = String(zip.read(zip.find(CONFIG)!!), Charsets.UTF_8)
                               dexName = org.json.JSONObject(old).optString("dex", "").ifEmpty { null }
                           } catch (e: Exception) { }
-                          if (dexName != null && zip.find(dexName) != null) replace[dexName] = hook
+                          if (dexName == null || zip.find(dexName) == null) {
+                              error("Cet APK a été modifié avec une ancienne version d'APK Forge : réimporte l'APK d'origine.")
+                          }
+                          replace[dexName] = hook
                           replace[CONFIG] = s.toJson(dexName).toByteArray(Charsets.UTF_8)
                       } else {
                           onProgress(Step.MANIFEST, 0.06f)
@@ -837,7 +840,7 @@ jobs:
           )
           private val RES_OPTIONS = listOf(0, 1080, 900, 720, 540, 360)
 
-          class PickedApk(val file: File, val displayName: String, val label: String, val pkg: String, val size: Long, val alreadyPatched: Boolean)
+          class PickedApk(val file: File, val displayName: String, val label: String, val pkg: String, val size: Long, val alreadyPatched: Boolean, val stale: Boolean)
           class HistItem(val name: String, val ms: Long, val size: Long, val summary: String, val path: String)
 
           object History {
@@ -858,6 +861,9 @@ jobs:
                   all.add(h)
                   all.addAll(load(p))
                   val a = JSONArray()
+                  for (x in all.drop(8)) {
+                      try { File(x.path).delete() } catch (e: Exception) { }
+                  }
                   for (x in all.take(8)) {
                       a.put(JSONObject().put("name", x.name).put("ms", x.ms).put("size", x.size).put("sum", x.summary).put("path", x.path))
                   }
@@ -883,10 +889,18 @@ jobs:
               val dst = File(ctx.cacheDir, "input.apk")
               val input = ctx.contentResolver.openInputStream(uri) ?: error("Fichier illisible")
               input.use { i -> dst.outputStream().use { o -> i.copyTo(o, 256 * 1024) } }
-              val already = try {
+              var already = false
+              var stale = false
+              try {
                   ApkZip(dst).use { z ->
                       if (z.find("AndroidManifest.xml") == null) throw IllegalStateException("AndroidManifest.xml absent")
-                      z.find("assets/apkforge.json") != null
+                      val cfg = z.find("assets/apkforge.json")
+                      already = cfg != null
+                      if (cfg != null) {
+                          stale = try {
+                              JSONObject(String(z.read(cfg), Charsets.UTF_8)).optString("dex", "").isEmpty()
+                          } catch (e: Exception) { true }
+                      }
                   }
               } catch (e: Exception) {
                   throw IllegalStateException("Ce fichier n'est pas un APK simple (les XAPK / APKS ne sont pas pris en charge).")
@@ -903,7 +917,7 @@ jobs:
                       label = ai.loadLabel(pm).toString()
                   }
               }
-              return PickedApk(dst, name, label, pkg, dst.length(), already)
+              return PickedApk(dst, name, label, pkg, dst.length(), already, stale)
           }
 
           private fun installApk(ctx: Context, f: File) {
@@ -1126,7 +1140,9 @@ jobs:
                           picked?.let { p ->
                               Text(p.label, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                               Text("${p.pkg} · ${fmtSize(p.size)}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                              if (p.alreadyPatched) {
+                              if (p.stale) {
+                                  Text("Modifié avec une ancienne version : réimporte l'APK d'origine.", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                              } else if (p.alreadyPatched) {
                                   Text("Déjà modifié : seuls les réglages seront remplacés.", color = MaterialTheme.colorScheme.secondary, fontSize = 13.sp)
                               }
                           }
@@ -1143,6 +1159,10 @@ jobs:
                               "Saturation", String.format(Locale.US, "x%.1f", settings.sat), settings.sat, 1f..2.5f, 14
                           ) { update(settings.copy(sat = (it * 10f).roundToInt() / 10f)) }
                           SatPreview(settings.sat)
+                          Text(
+                              "La saturation est appliquée sur l'image du jeu (Android 10 minimum). Au lancement, un message « APK Forge » indique si elle est active.",
+                              fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                          )
 
                           Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
                               StretchPreview(settings.sx, settings.sy)
@@ -1190,7 +1210,7 @@ jobs:
                           if (!running) {
                               Button(
                                   onClick = { startExport() },
-                                  enabled = picked != null && !importing,
+                                  enabled = picked != null && picked?.stale != true && !importing,
                                   modifier = Modifier.fillMaxWidth().height(56.dp),
                                   shape = RoundedCornerShape(18.dp)
                               ) {
@@ -1269,14 +1289,19 @@ jobs:
           import android.graphics.ColorMatrix;
           import android.graphics.ColorMatrixColorFilter;
           import android.graphics.Paint;
+          import android.graphics.Rect;
           import android.net.Uri;
+          import android.os.Build;
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.Looper;
+          import android.view.SurfaceControl;
+          import android.view.SurfaceHolder;
           import android.view.SurfaceView;
           import android.view.TextureView;
           import android.view.View;
           import android.view.ViewGroup;
+          import android.widget.Toast;
           import java.io.ByteArrayOutputStream;
           import java.io.InputStream;
           import java.util.ArrayList;
@@ -1284,11 +1309,18 @@ jobs:
           import java.util.Map;
           import java.util.WeakHashMap;
           import org.json.JSONObject;
+          import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
-          /** Module injecté par APK Forge : lit assets/apkforge.json et applique résolution, étirement et saturation. */
+          /**
+           * Module injecté par APK Forge. Lit assets/apkforge.json puis applique :
+           *  - résolution étirée : setFixedSize avec un ratio différent (Android étire le buffer sur la vue) ;
+           *  - saturation : matrice de couleur appliquée directement sur le calque (SurfaceControl) du jeu.
+           */
           public class TweakProvider extends ContentProvider {
               static float sat = 1f, sx = 1f, sy = 1f;
               static int render = 0;
+              static final Map<View, Boolean> hooked = new WeakHashMap<View, Boolean>();
+              static boolean told = false;
 
               @Override public boolean onCreate() {
                   try {
@@ -1326,26 +1358,26 @@ jobs:
               static void schedule(final Activity a) {
                   final Handler h = new Handler(Looper.getMainLooper());
                   h.post(new Runnable() {
-                      int tries = 0, checks = 0;
+                      int tries = 0;
                       public void run() {
                           try {
-                              List<View> found = new ArrayList<View>();
-                              collect(a.getWindow().getDecorView(), found);
-                              View best = null; int area = 0;
-                              for (View v : found) {
-                                  int s = v.getWidth() * v.getHeight();
-                                  if (s > area) { area = s; best = v; }
-                              }
-                              if (best != null) {
-                                  tweak(best);
-                                  // Unity peut remettre sa taille d'origine : on revérifie pendant ~12 s
-                                  if (checks++ < 12) h.postDelayed(this, 1000);
-                              } else if (tries++ < 80) {
-                                  h.postDelayed(this, 250);
-                              }
+                              View best = biggest(a);
+                              if (best != null) attach(a, best);
+                              else if (tries++ < 80) h.postDelayed(this, 250);
                           } catch (Throwable t) { }
                       }
                   });
+              }
+
+              static View biggest(Activity a) {
+                  List<View> found = new ArrayList<View>();
+                  collect(a.getWindow().getDecorView(), found);
+                  View best = null; int area = 0;
+                  for (View v : found) {
+                      int s = v.getWidth() * v.getHeight();
+                      if (s > area) { area = s; best = v; }
+                  }
+                  return best;
               }
 
               static void collect(View v, List<View> out) {
@@ -1356,20 +1388,40 @@ jobs:
                   }
               }
 
-              /**
-               * Résolution étirée : le jeu dessine dans un buffer plus petit / d'un autre ratio, et Android l'étire
-               * sur toute la vue (aucune transformation de vue, donc aucune bande noire).
-               */
-              static void tweak(View v) {
-                  if (!(v instanceof SurfaceView)) {
-                      if (sat != 1f) { // TextureView : le filtre de saturation fonctionne
-                          ColorMatrix cm = new ColorMatrix(); cm.setSaturation(sat);
-                          Paint p = new Paint(); p.setColorFilter(new ColorMatrixColorFilter(cm));
-                          v.setLayerType(View.LAYER_TYPE_HARDWARE, p);
-                      }
-                      return;
+              /** Applique les réglages, puis les réapplique à chaque (re)création de la surface du jeu. */
+              static void attach(final Activity a, final View v) {
+                  apply(a, v);
+                  if (v instanceof SurfaceView && !hooked.containsKey(v)) {
+                      hooked.put(v, Boolean.TRUE);
+                      ((SurfaceView) v).getHolder().addCallback(new SurfaceHolder.Callback() {
+                          public void surfaceCreated(SurfaceHolder holder) { later(a, v); }
+                          public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) { later(a, v); }
+                          public void surfaceDestroyed(SurfaceHolder holder) { }
+                      });
                   }
-                  SurfaceView sv = (SurfaceView) v;
+              }
+
+              static void later(final Activity a, final View v) {
+                  v.post(new Runnable() {
+                      public void run() { try { apply(a, v); } catch (Throwable t) { } }
+                  });
+              }
+
+              static void apply(Activity a, View v) {
+                  if (v instanceof SurfaceView) {
+                      SurfaceView sv = (SurfaceView) v;
+                      resolution(sv);
+                      if (sat != 1f) tell(a, saturation(sv));
+                  } else if (sat != 1f) {
+                      ColorMatrix cm = new ColorMatrix(); cm.setSaturation(sat);
+                      Paint p = new Paint(); p.setColorFilter(new ColorMatrixColorFilter(cm));
+                      v.setLayerType(View.LAYER_TYPE_HARDWARE, p);
+                      tell(a, 1);
+                  }
+              }
+
+              /** Résolution étirée : le jeu dessine dans tw x th, Android étire le résultat sur toute la vue. */
+              static void resolution(SurfaceView sv) {
                   int w = sv.getWidth(), h = sv.getHeight();
                   if (w <= 0 || h <= 0) return;
                   float f = 1f;
@@ -1380,8 +1432,44 @@ jobs:
                   int tw = Math.max(1, Math.round(w * f / sx));
                   int th = Math.max(1, Math.round(h * f / sy));
                   if (tw >= w && th >= h) return;
-                  android.graphics.Rect cur = sv.getHolder().getSurfaceFrame();
+                  Rect cur = sv.getHolder().getSurfaceFrame();
                   if (cur.width() != tw || cur.height() != th) sv.getHolder().setFixedSize(tw, th);
+              }
+
+              /** 1 = appliquée, 0 = impossible sur cet appareil, -1 = surface pas encore prête. */
+              static int saturation(SurfaceView sv) {
+                  if (Build.VERSION.SDK_INT < 29) return 0;
+                  SurfaceControl sc = sv.getSurfaceControl();
+                  if (sc == null || !sc.isValid()) return -1;
+                  // matrice symétrique (poids égaux) : sat sur la diagonale, le reste = (1 - sat) / 3
+                  float k = (1f - sat) / 3f;
+                  float[] m = new float[9];
+                  for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) m[i * 3 + j] = k + (i == j ? sat : 0f);
+                  SurfaceControl.Transaction t = new SurfaceControl.Transaction();
+                  try {
+                      try {
+                          HiddenApiBypass.invoke(SurfaceControl.Transaction.class, t, "setColorTransform", sc, m, new float[3]);
+                      } catch (Throwable e1) {
+                          HiddenApiBypass.addHiddenApiExemptions("Landroid/view/SurfaceControl");
+                          java.lang.reflect.Method mm = SurfaceControl.Transaction.class.getMethod(
+                                  "setColorTransform", SurfaceControl.class, float[].class, float[].class);
+                          mm.invoke(t, sc, m, new float[3]);
+                      }
+                      t.apply();
+                      return 1;
+                  } catch (Throwable e) {
+                      return 0;
+                  } finally {
+                      t.close();
+                  }
+              }
+
+              /** Petit message, une seule fois : dit si la saturation est active. */
+              static void tell(Activity a, int result) {
+                  if (told || result < 0) return;
+                  told = true;
+                  String msg = result == 1 ? "APK Forge : saturation active" : "APK Forge : saturation non prise en charge ici";
+                  Toast.makeText(a, msg, Toast.LENGTH_LONG).show();
               }
 
               @Override public Cursor query(Uri u, String[] p, String s, String[] a, String o) { return null; }
@@ -1397,9 +1485,12 @@ jobs:
           set -e
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           AJ="$ANDROID_HOME/platforms/android-34/android.jar"
-          mkdir -p hook/cls hook/out app/src/main/assets
-          javac --release 8 -cp "$AJ" -d hook/cls hook/patch/TweakProvider.java
-          "$BT/d8" --release --min-api 21 --lib "$AJ" --output hook/out $(find hook/cls -name '*.class')
+          mkdir -p hook/cls hook/out hook/lib app/src/main/assets
+          # bibliothèque qui autorise l'appel de l'API Android cachée (filtre de couleur sur l'image du jeu)
+          curl -fL -o hook/lib/hab.aar https://repo1.maven.org/maven2/org/lsposed/hiddenapibypass/hiddenapibypass/6.1/hiddenapibypass-6.1.aar
+          unzip -o -q hook/lib/hab.aar classes.jar -d hook/lib
+          javac -XDstringConcat=inline -cp "$AJ:hook/lib/classes.jar" -d hook/cls hook/patch/TweakProvider.java
+          "$BT/d8" --release --min-api 21 --lib "$AJ" --output hook/out $(find hook/cls -name '*.class') hook/lib/classes.jar
           cp hook/out/classes.dex app/src/main/assets/hook.dex
 
       - name: Restaurer les clés de signature
