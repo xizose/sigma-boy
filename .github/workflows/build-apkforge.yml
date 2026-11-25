@@ -1,0 +1,1435 @@
+# À placer dans : .github/workflows/build-apkforge.yml
+#
+# Ce workflow génère tout seul le projet Android "APK Forge" et le compile.
+# Résultat : une appli (APK) où tu importes un APK, règles saturation / étirement /
+# résolution avec des curseurs, puis exportes l'APK modifié (signé) sur la tablette.
+# Aucun ordinateur, aucun ADB, aucun débogage.
+#
+# Lancement : Actions > Build APK Forge > Run workflow, puis télécharger "APK-Forge" dans Artifacts.
+
+name: Build APK Forge
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Écrire le projet Android
+        run: |
+          set -e
+          cat > settings.gradle.kts <<'FORGE_EOF_1'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ApkForge"
+          include(":app")
+          FORGE_EOF_1
+          cat > build.gradle.kts <<'FORGE_EOF_2'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+          }
+          FORGE_EOF_2
+          cat > gradle.properties <<'FORGE_EOF_3'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          FORGE_EOF_3
+          mkdir -p app
+          cat > app/build.gradle.kts <<'FORGE_EOF_4'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.apkforge"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.apkforge"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              packaging { resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES") }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+              implementation("com.android.tools.build:apksig:8.5.2")
+          }
+          FORGE_EOF_4
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'FORGE_EOF_5'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+              <application
+                  android:allowBackup="false"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="APK Forge"
+                  android:largeHeap="true"
+                  android:theme="@style/Theme.Forge">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.files"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+                  </provider>
+              </application>
+          </manifest>
+          FORGE_EOF_5
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/themes.xml <<'FORGE_EOF_6'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.Forge" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#0B0F14</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+              <color name="forge_bg">#123B34</color>
+          </resources>
+          FORGE_EOF_6
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/file_paths.xml <<'FORGE_EOF_7'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <external-files-path name="exports_ext" path="exports/" />
+              <files-path name="exports_int" path="exports/" />
+          </paths>
+          FORGE_EOF_7
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_forge_fg.xml <<'FORGE_EOF_8'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#8CF0C4" android:pathData="M58,24 L38,60 L50,60 L46,86 L70,48 L57,48 Z" />
+          </vector>
+          FORGE_EOF_8
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'FORGE_EOF_9'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/forge_bg" />
+              <foreground android:drawable="@drawable/ic_forge_fg" />
+          </adaptive-icon>
+          FORGE_EOF_9
+          mkdir -p app/src/main/java/com/apkforge
+          cat > app/src/main/java/com/apkforge/AxmlPatcher.java <<'FORGE_EOF_10'
+          package com.apkforge;
+
+          import java.io.ByteArrayOutputStream;
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.nio.charset.StandardCharsets;
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /** Ajoute un <provider> dans un AndroidManifest.xml binaire (AXML), sans rien décompiler. */
+          public final class AxmlPatcher {
+              private static final int T_XML = 0x0003, T_POOL = 0x0001, T_RESMAP = 0x0180;
+              private static final int T_START_NS = 0x0100, T_END_NS = 0x0101, T_START_EL = 0x0102, T_END_EL = 0x0103, T_CDATA = 0x0104;
+              private static final String ANDROID_NS = "http://schemas.android.com/apk/res/android";
+              private static final int ID_NAME = 0x01010003, ID_EXPORTED = 0x01010010, ID_AUTHORITIES = 0x01010018;
+
+              private AxmlPatcher() {}
+
+              private static int i32(byte[] b, int p) { return ByteBuffer.wrap(b, p, 4).order(ByteOrder.LITTLE_ENDIAN).getInt(); }
+              private static int u16(byte[] b, int p) { return (b[p] & 0xFF) | ((b[p + 1] & 0xFF) << 8); }
+              private static void p32(byte[] b, int p, int v) { b[p] = (byte) v; b[p + 1] = (byte) (v >> 8); b[p + 2] = (byte) (v >> 16); b[p + 3] = (byte) (v >> 24); }
+              private static void p16(byte[] b, int p, int v) { b[p] = (byte) v; b[p + 1] = (byte) (v >> 8); }
+              private static void w32(ByteArrayOutputStream o, int v) { o.write(v); o.write(v >> 8); o.write(v >> 16); o.write(v >> 24); }
+              private static void w16(ByteArrayOutputStream o, int v) { o.write(v); o.write(v >> 8); }
+
+              private static final class Chunk { int type; byte[] data; Chunk(int t, byte[] d) { type = t; data = d; } }
+
+              // ---------- chaînes ----------
+              private static String readStr(byte[] b, int pos, boolean utf8) {
+                  if (utf8) {
+                      int p = pos;
+                      int n16 = b[p++] & 0xFF; if ((n16 & 0x80) != 0) n16 = ((n16 & 0x7F) << 8) | (b[p++] & 0xFF);
+                      int n8 = b[p++] & 0xFF; if ((n8 & 0x80) != 0) n8 = ((n8 & 0x7F) << 8) | (b[p++] & 0xFF);
+                      return new String(b, p, n8, StandardCharsets.UTF_8);
+                  }
+                  int len = u16(b, pos); int p = pos + 2;
+                  if ((len & 0x8000) != 0) { len = ((len & 0x7FFF) << 16) | u16(b, p); p += 2; }
+                  char[] c = new char[len];
+                  for (int i = 0; i < len; i++) c[i] = (char) u16(b, p + 2 * i);
+                  return new String(c);
+              }
+
+              private static void len8(ByteArrayOutputStream o, int n) { if (n > 0x7F) { o.write((n >> 8) | 0x80); o.write(n & 0xFF); } else o.write(n); }
+
+              private static byte[] encStr(String s, boolean utf8) {
+                  ByteArrayOutputStream o = new ByteArrayOutputStream();
+                  if (utf8) {
+                      byte[] u = s.getBytes(StandardCharsets.UTF_8);
+                      len8(o, s.length()); len8(o, u.length); o.write(u, 0, u.length); o.write(0);
+                  } else {
+                      int n = s.length();
+                      if (n > 0x7FFF) { w16(o, (n >> 16) | 0x8000); w16(o, n & 0xFFFF); } else w16(o, n);
+                      for (int i = 0; i < n; i++) w16(o, s.charAt(i));
+                      w16(o, 0);
+                  }
+                  return o.toByteArray();
+              }
+
+              private static byte[] buildPool(List<String> strs, boolean utf8) {
+                  ByteArrayOutputStream data = new ByteArrayOutputStream();
+                  int[] offs = new int[strs.size()];
+                  for (int i = 0; i < strs.size(); i++) { offs[i] = data.size(); byte[] e = encStr(strs.get(i), utf8); data.write(e, 0, e.length); }
+                  while (data.size() % 4 != 0) data.write(0);
+                  int stringsStart = 28 + 4 * strs.size();
+                  int size = stringsStart + data.size();
+                  ByteArrayOutputStream o = new ByteArrayOutputStream();
+                  w16(o, T_POOL); w16(o, 28); w32(o, size); w32(o, strs.size()); w32(o, 0);
+                  w32(o, utf8 ? 0x100 : 0); w32(o, stringsStart); w32(o, 0);
+                  for (int off : offs) w32(o, off);
+                  byte[] d = data.toByteArray(); o.write(d, 0, d.length);
+                  return o.toByteArray();
+              }
+
+              // ---------- API ----------
+              /** Retourne le manifest patché. Lance IllegalStateException si le format est inattendu. */
+              public static byte[] addProvider(byte[] in, String providerClass, String authoritySuffix) {
+                  if (in.length < 8 || u16(in, 0) != T_XML) throw new IllegalStateException("Manifest binaire invalide");
+                  int total = Math.min(i32(in, 4), in.length);
+
+                  List<Chunk> chunks = new ArrayList<Chunk>();
+                  for (int pos = 8; pos + 8 <= total; ) {
+                      int type = u16(in, pos), size = i32(in, pos + 4);
+                      if (size < 8 || pos + size > in.length) throw new IllegalStateException("Chunk corrompu");
+                      byte[] d = new byte[size]; System.arraycopy(in, pos, d, 0, size);
+                      chunks.add(new Chunk(type, d)); pos += size;
+                  }
+
+                  // pool
+                  int poolIdx = -1, mapIdx = -1;
+                  for (int i = 0; i < chunks.size(); i++) {
+                      if (chunks.get(i).type == T_POOL && poolIdx < 0) poolIdx = i;
+                      if (chunks.get(i).type == T_RESMAP && mapIdx < 0) mapIdx = i;
+                  }
+                  if (poolIdx < 0) throw new IllegalStateException("Pool de chaînes introuvable");
+                  byte[] pd = chunks.get(poolIdx).data;
+                  int count = i32(pd, 8), styleCount = i32(pd, 12), flags = i32(pd, 16), strStart = i32(pd, 20);
+                  int hdr = u16(pd, 2);
+                  if (styleCount != 0) throw new IllegalStateException("Styles non pris en charge");
+                  boolean utf8 = (flags & 0x100) != 0;
+                  List<String> strs = new ArrayList<String>();
+                  for (int i = 0; i < count; i++) strs.add(readStr(pd, strStart + i32(pd, hdr + 4 * i), utf8));
+
+                  // resmap
+                  List<Integer> ids = new ArrayList<Integer>();
+                  if (mapIdx >= 0) {
+                      byte[] md = chunks.get(mapIdx).data;
+                      for (int p = 8; p + 4 <= md.length; p += 4) ids.add(i32(md, p));
+                  }
+                  final int n0 = ids.size();
+
+                  // attributs manquants : insérés juste après les chaînes liées à un id de ressource
+                  int[] want = { ID_NAME, ID_EXPORTED, ID_AUTHORITIES };
+                  String[] wantName = { "name", "exported", "authorities" };
+                  List<Integer> addedIds = new ArrayList<Integer>();
+                  List<String> addedStr = new ArrayList<String>();
+                  for (int k = 0; k < want.length; k++) {
+                      if (ids.indexOf(want[k]) < 0) { addedIds.add(want[k]); addedStr.add(wantName[k]); }
+                  }
+                  final int k = addedStr.size();
+                  if (k > 0 && mapIdx < 0) throw new IllegalStateException("Table des ressources absente");
+
+                  List<String> ns = new ArrayList<String>();
+                  for (int i = 0; i < n0 && i < strs.size(); i++) ns.add(strs.get(i));
+                  ns.addAll(addedStr);
+                  for (int i = n0; i < strs.size(); i++) ns.add(strs.get(i));
+                  List<Integer> nids = new ArrayList<Integer>(ids); nids.addAll(addedIds);
+
+                  // remap des index de chaînes
+                  final int shift = k;
+                  // (lambda-free helper via anonymous class)
+                  class Remap { int f(int v) { return (v == -1 || v < n0) ? v : v + shift; } }
+                  Remap rm = new Remap();
+
+                  // prépare chaînes ajoutées à la fin
+                  int androidNs = ns.indexOf(ANDROID_NS);
+                  if (androidNs < 0) throw new IllegalStateException("Espace de noms android introuvable");
+                  int idxProvider = ns.indexOf("provider"); if (idxProvider < 0) { ns.add("provider"); idxProvider = ns.size() - 1; }
+
+                  // parcours des noeuds : remap + package + position de </application>
+                  String pkg = null; int appEnd = -1;
+                  for (int c = 0; c < chunks.size(); c++) {
+                      Chunk ch = chunks.get(c); byte[] d = ch.data;
+                      switch (ch.type) {
+                          case T_START_NS: case T_END_NS:
+                              p32(d, 16, rm.f(i32(d, 16))); p32(d, 20, rm.f(i32(d, 20))); break;
+                          case T_START_EL: {
+                              p32(d, 16, rm.f(i32(d, 16))); p32(d, 20, rm.f(i32(d, 20)));
+                              int attrStart = u16(d, 24), attrSize = u16(d, 26), attrCount = u16(d, 28);
+                              String elName = ns.get(i32(d, 20));
+                              for (int a = 0; a < attrCount; a++) {
+                                  int p = 16 + attrStart + a * attrSize;
+                                  p32(d, p, rm.f(i32(d, p))); p32(d, p + 4, rm.f(i32(d, p + 4))); p32(d, p + 8, rm.f(i32(d, p + 8)));
+                                  if ((d[p + 15] & 0xFF) == 0x03) p32(d, p + 16, rm.f(i32(d, p + 16)));
+                                  if (pkg == null && "manifest".equals(elName) && i32(d, p) == -1 && "package".equals(ns.get(i32(d, p + 4)))) {
+                                      int raw = i32(d, p + 8);
+                                      if (raw >= 0) pkg = ns.get(raw);
+                                  }
+                              }
+                              break;
+                          }
+                          case T_END_EL: {
+                              p32(d, 16, rm.f(i32(d, 16))); p32(d, 20, rm.f(i32(d, 20)));
+                              if ("application".equals(ns.get(i32(d, 20)))) appEnd = c;
+                              break;
+                          }
+                          case T_CDATA:
+                              p32(d, 16, rm.f(i32(d, 16)));
+                              if ((d[16 + 7] & 0xFF) == 0x03) p32(d, 16 + 8, rm.f(i32(d, 16 + 8)));
+                              break;
+                          default: break;
+                      }
+                  }
+                  if (pkg == null) throw new IllegalStateException("Nom de package introuvable");
+                  if (appEnd < 0) throw new IllegalStateException("Balise <application> introuvable");
+
+                  // valeurs
+                  String authority = pkg + authoritySuffix;
+                  ns.add(providerClass); int idxClass = ns.size() - 1;
+                  ns.add(authority); int idxAuth = ns.size() - 1;
+
+                  int resName = nids.indexOf(ID_NAME), resExported = nids.indexOf(ID_EXPORTED), resAuth = nids.indexOf(ID_AUTHORITIES);
+
+                  // <provider> (attributs triés par id de ressource : name, exported, authorities)
+                  ByteArrayOutputStream st = new ByteArrayOutputStream();
+                  w16(st, T_START_EL); w16(st, 16); w32(st, 16 + 20 + 3 * 20); w32(st, 1); w32(st, -1);
+                  w32(st, -1); w32(st, idxProvider); w16(st, 20); w16(st, 20); w16(st, 3); w16(st, 0); w16(st, 0); w16(st, 0);
+                  // name
+                  w32(st, androidNs); w32(st, resName); w32(st, idxClass); w16(st, 8); st.write(0); st.write(0x03); w32(st, idxClass);
+                  // exported=false
+                  w32(st, androidNs); w32(st, resExported); w32(st, -1); w16(st, 8); st.write(0); st.write(0x12); w32(st, 0);
+                  // authorities
+                  w32(st, androidNs); w32(st, resAuth); w32(st, idxAuth); w16(st, 8); st.write(0); st.write(0x03); w32(st, idxAuth);
+                  ByteArrayOutputStream en = new ByteArrayOutputStream();
+                  w16(en, T_END_EL); w16(en, 16); w32(en, 24); w32(en, 1); w32(en, -1); w32(en, -1); w32(en, idxProvider);
+
+                  chunks.add(appEnd, new Chunk(T_END_EL, en.toByteArray()));
+                  chunks.add(appEnd, new Chunk(T_START_EL, st.toByteArray()));
+
+                  // nouveau pool + resmap
+                  chunks.set(poolIdx, new Chunk(T_POOL, buildPool(ns, utf8)));
+                  if (mapIdx >= 0) {
+                      ByteArrayOutputStream mo = new ByteArrayOutputStream();
+                      w16(mo, T_RESMAP); w16(mo, 8); w32(mo, 8 + 4 * nids.size());
+                      for (int id : nids) w32(mo, id);
+                      chunks.set(mapIdx, new Chunk(T_RESMAP, mo.toByteArray()));
+                  }
+
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  w16(out, T_XML); w16(out, 8); w32(out, 0);
+                  for (Chunk c : chunks) out.write(c.data, 0, c.data.length);
+                  byte[] res = out.toByteArray();
+                  p32(res, 4, res.length);
+                  return res;
+              }
+          }
+          FORGE_EOF_10
+          mkdir -p app/src/main/java/com/apkforge
+          cat > app/src/main/java/com/apkforge/ApkZip.java <<'FORGE_EOF_11'
+          package com.apkforge;
+
+          import java.io.BufferedOutputStream;
+          import java.io.ByteArrayOutputStream;
+          import java.io.Closeable;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.io.OutputStream;
+          import java.io.RandomAccessFile;
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.nio.charset.StandardCharsets;
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Map;
+          import java.util.zip.CRC32;
+          import java.util.zip.DataFormatException;
+          import java.util.zip.Deflater;
+          import java.util.zip.Inflater;
+
+          /**
+           * Lecture / réécriture d'un APK (zip) sans recompresser : les données déjà compressées sont recopiées telles quelles,
+           * les entrées non compressées sont réalignées (4 octets, 16 Ko pour les .so). Les anciennes signatures sont retirées.
+           */
+          public final class ApkZip implements Closeable {
+              public interface Progress { void onBytes(long done, long total); }
+
+              public static final class Entry {
+                  public String name; byte[] nameBytes;
+                  int flags, method, time, date, intAttr;
+                  long crc, comp, uncomp, extAttr, localOff;
+                  long dataOff = -1;
+              }
+
+              private final RandomAccessFile raf;
+              private final List<Entry> entries = new ArrayList<Entry>();
+
+              public ApkZip(File f) throws IOException {
+                  raf = new RandomAccessFile(f, "r");
+                  try { parse(); } catch (IOException e) { raf.close(); throw e; } catch (RuntimeException e) { raf.close(); throw e; }
+              }
+
+              public List<Entry> entries() { return entries; }
+
+              public Entry find(String name) {
+                  for (Entry e : entries) if (e.name.equals(name)) return e;
+                  return null;
+              }
+
+              private void parse() throws IOException {
+                  long len = raf.length();
+                  int tail = (int) Math.min(len, 65557);
+                  byte[] t = new byte[tail];
+                  raf.seek(len - tail); raf.readFully(t);
+                  int eocd = -1;
+                  for (int i = tail - 22; i >= 0; i--) {
+                      if (t[i] == 0x50 && t[i + 1] == 0x4b && t[i + 2] == 0x05 && t[i + 3] == 0x06) { eocd = i; break; }
+                  }
+                  if (eocd < 0) throw new IOException("Pas un fichier ZIP/APK");
+                  ByteBuffer e = ByteBuffer.wrap(t).order(ByteOrder.LITTLE_ENDIAN);
+                  int count = e.getShort(eocd + 10) & 0xFFFF;
+                  long cdSize = e.getInt(eocd + 12) & 0xFFFFFFFFL, cdOff = e.getInt(eocd + 16) & 0xFFFFFFFFL;
+                  if (cdOff == 0xFFFFFFFFL || count == 0xFFFF) throw new IOException("ZIP64 non pris en charge");
+                  byte[] cd = new byte[(int) cdSize];
+                  raf.seek(cdOff); raf.readFully(cd);
+                  ByteBuffer b = ByteBuffer.wrap(cd).order(ByteOrder.LITTLE_ENDIAN);
+                  int p = 0;
+                  for (int i = 0; i < count; i++) {
+                      if (b.getInt(p) != 0x02014b50) throw new IOException("Répertoire central corrompu");
+                      Entry en = new Entry();
+                      en.flags = b.getShort(p + 8) & 0xFFFF; en.method = b.getShort(p + 10) & 0xFFFF;
+                      en.time = b.getShort(p + 12) & 0xFFFF; en.date = b.getShort(p + 14) & 0xFFFF;
+                      en.crc = b.getInt(p + 16) & 0xFFFFFFFFL; en.comp = b.getInt(p + 20) & 0xFFFFFFFFL; en.uncomp = b.getInt(p + 24) & 0xFFFFFFFFL;
+                      int nl = b.getShort(p + 28) & 0xFFFF, xl = b.getShort(p + 30) & 0xFFFF, cl = b.getShort(p + 32) & 0xFFFF;
+                      en.intAttr = b.getShort(p + 36) & 0xFFFF; en.extAttr = b.getInt(p + 38) & 0xFFFFFFFFL;
+                      en.localOff = b.getInt(p + 42) & 0xFFFFFFFFL;
+                      en.nameBytes = new byte[nl]; System.arraycopy(cd, p + 46, en.nameBytes, 0, nl);
+                      en.name = new String(en.nameBytes, StandardCharsets.UTF_8);
+                      p += 46 + nl + xl + cl;
+                      entries.add(en);
+                  }
+              }
+
+              private long dataOffset(Entry e) throws IOException {
+                  if (e.dataOff < 0) {
+                      byte[] h = new byte[30];
+                      raf.seek(e.localOff); raf.readFully(h);
+                      ByteBuffer b = ByteBuffer.wrap(h).order(ByteOrder.LITTLE_ENDIAN);
+                      if (b.getInt(0) != 0x04034b50) throw new IOException("En-tête local corrompu : " + e.name);
+                      e.dataOff = e.localOff + 30 + (b.getShort(26) & 0xFFFF) + (b.getShort(28) & 0xFFFF);
+                  }
+                  return e.dataOff;
+              }
+
+              /** Contenu décompressé d'une entrée (pour les petits fichiers : manifest, config...). */
+              public byte[] read(Entry e) throws IOException {
+                  byte[] raw = new byte[(int) e.comp];
+                  raf.seek(dataOffset(e)); raf.readFully(raw);
+                  if (e.method == 0) return raw;
+                  Inflater inf = new Inflater(true);
+                  try {
+                      inf.setInput(raw);
+                      byte[] out = new byte[(int) e.uncomp];
+                      int n = 0;
+                      while (n < out.length && !inf.finished()) {
+                          int r = inf.inflate(out, n, out.length - n);
+                          if (r == 0 && (inf.needsInput() || inf.needsDictionary())) break;
+                          n += r;
+                      }
+                      return out;
+                  } catch (DataFormatException ex) {
+                      throw new IOException("Données compressées invalides : " + e.name);
+                  } finally { inf.end(); }
+              }
+
+              private static boolean isSignature(String n) {
+                  if (!n.startsWith("META-INF/")) return false;
+                  String u = n.toUpperCase(java.util.Locale.ROOT);
+                  return u.equals("META-INF/MANIFEST.MF") || u.endsWith(".SF") || u.endsWith(".RSA") || u.endsWith(".DSA") || u.endsWith(".EC");
+              }
+
+              private static final class Out {
+                  final OutputStream os; long pos;
+                  Out(OutputStream o) { os = o; }
+                  void b(byte[] d, int off, int len) throws IOException { os.write(d, off, len); pos += len; }
+                  void b(byte[] d) throws IOException { b(d, 0, d.length); }
+                  void u16(int v) throws IOException { os.write(v); os.write(v >> 8); pos += 2; }
+                  void u32(long v) throws IOException { os.write((int) v); os.write((int) (v >> 8)); os.write((int) (v >> 16)); os.write((int) (v >> 24)); pos += 4; }
+              }
+
+              private static final class Done {
+                  byte[] nameBytes; int flags, method, time, date, intAttr; long crc, comp, uncomp, extAttr, off;
+              }
+
+              private static long header(Out o, Done d, int align) throws IOException {
+                  long off = o.pos;
+                  int pad = 0;
+                  if (d.method == 0 && align > 1) {
+                      long dataPos = o.pos + 30 + d.nameBytes.length;
+                      pad = (int) ((align - (dataPos % align)) % align);
+                      if (pad > 0 && pad < 4) pad += align;
+                  }
+                  o.u32(0x04034b50L); o.u16(20); o.u16(d.flags & ~0x08); o.u16(d.method); o.u16(d.time); o.u16(d.date);
+                  o.u32(d.crc); o.u32(d.comp); o.u32(d.uncomp); o.u16(d.nameBytes.length); o.u16(pad);
+                  o.b(d.nameBytes);
+                  if (pad > 0) { o.u16(0xD935); o.u16(pad - 4); o.b(new byte[pad - 4]); }
+                  return off;
+              }
+
+              /**
+               * Écrit un nouvel APK (non signé).
+               * @param replace entrées existantes à remplacer par ce contenu
+               * @param add     entrées à ajouter
+               */
+              public void write(File out, Map<String, byte[]> replace, Map<String, byte[]> add, Progress prog) throws IOException {
+                  long total = 0;
+                  for (Entry e : entries) if (!isSignature(e.name) && !e.name.endsWith("/") && !replace.containsKey(e.name)) total += e.comp;
+                  if (total == 0) total = 1;
+                  long done = 0;
+                  List<Done> list = new ArrayList<Done>();
+                  OutputStream fos = new BufferedOutputStream(new FileOutputStream(out), 1 << 18);
+                  try {
+                      Out o = new Out(fos);
+                      byte[] buf = new byte[1 << 18];
+                      for (Entry e : entries) {
+                          if (isSignature(e.name) || e.name.endsWith("/")) continue;
+                          Done d = new Done();
+                          d.nameBytes = e.nameBytes; d.flags = e.flags; d.time = e.time; d.date = e.date;
+                          d.intAttr = e.intAttr; d.extAttr = e.extAttr;
+                          byte[] mem = replace.get(e.name);
+                          if (mem != null) {
+                              fill(d, mem);
+                              d.off = header(o, d, 4);
+                              o.b(mem == null ? new byte[0] : lastData);
+                          } else {
+                              d.method = e.method; d.crc = e.crc; d.comp = e.comp; d.uncomp = e.uncomp;
+                              d.off = header(o, d, e.name.endsWith(".so") ? 16384 : 4);
+                              raf.seek(dataOffset(e));
+                              long left = e.comp;
+                              while (left > 0) {
+                                  int n = raf.read(buf, 0, (int) Math.min(buf.length, left));
+                                  if (n < 0) throw new IOException("Fin de fichier inattendue : " + e.name);
+                                  o.b(buf, 0, n); left -= n; done += n;
+                                  if (prog != null) prog.onBytes(done, total);
+                              }
+                          }
+                          list.add(d);
+                      }
+                      for (Map.Entry<String, byte[]> a : add.entrySet()) {
+                          Done d = new Done();
+                          d.nameBytes = a.getKey().getBytes(StandardCharsets.UTF_8); d.flags = 0x0800; d.time = 0; d.date = (44 << 9) | (1 << 5) | 1;
+                          fill(d, a.getValue());
+                          d.off = header(o, d, 4);
+                          o.b(lastData);
+                          list.add(d);
+                      }
+                      long cdStart = o.pos;
+                      for (Done d : list) {
+                          o.u32(0x02014b50L); o.u16(20); o.u16(20); o.u16(d.flags & ~0x08); o.u16(d.method); o.u16(d.time); o.u16(d.date);
+                          o.u32(d.crc); o.u32(d.comp); o.u32(d.uncomp); o.u16(d.nameBytes.length); o.u16(0); o.u16(0);
+                          o.u16(0); o.u16(d.intAttr); o.u32(d.extAttr); o.u32(d.off); o.b(d.nameBytes);
+                      }
+                      long cdSize = o.pos - cdStart;
+                      if (o.pos > 0xFFFFFFFFL || list.size() >= 0xFFFF) throw new IOException("APK trop gros (ZIP64)");
+                      o.u32(0x06054b50L); o.u16(0); o.u16(0); o.u16(list.size()); o.u16(list.size()); o.u32(cdSize); o.u32(cdStart); o.u16(0);
+                      fos.flush();
+                  } finally { fos.close(); }
+              }
+
+              private byte[] lastData;
+
+              /** Remplit method/crc/tailles d'une entrée venant de la mémoire (deflate, ou stocké si ça ne réduit pas). */
+              private void fill(Done d, byte[] data) {
+                  CRC32 c = new CRC32(); c.update(data, 0, data.length);
+                  d.crc = c.getValue(); d.uncomp = data.length;
+                  Deflater df = new Deflater(Deflater.DEFAULT_COMPRESSION, true);
+                  df.setInput(data); df.finish();
+                  ByteArrayOutputStream bo = new ByteArrayOutputStream(Math.max(64, data.length / 2));
+                  byte[] tmp = new byte[8192];
+                  while (!df.finished()) { int n = df.deflate(tmp); bo.write(tmp, 0, n); }
+                  df.end();
+                  if (bo.size() < data.length) { d.method = 8; lastData = bo.toByteArray(); }
+                  else { d.method = 0; lastData = data; }
+                  d.comp = lastData.length;
+              }
+
+              @Override public void close() throws IOException { raf.close(); }
+          }
+          FORGE_EOF_11
+          mkdir -p app/src/main/java/com/apkforge
+          cat > app/src/main/java/com/apkforge/PatchEngine.kt <<'FORGE_EOF_12'
+          package com.apkforge
+
+          import android.content.Context
+          import com.android.apksig.ApkSigner
+          import java.io.ByteArrayInputStream
+          import java.io.File
+          import java.security.KeyFactory
+          import java.security.cert.CertificateFactory
+          import java.security.cert.X509Certificate
+          import java.security.spec.PKCS8EncodedKeySpec
+          import java.util.Locale
+
+          data class TweakSettings(
+              val sat: Float = 1f,
+              val stretchV: Int = 0,
+              val stretchH: Int = 0,
+              val renderLong: Int = 0
+          ) {
+              val sx: Float get() = 1f + 0.1f * stretchH
+              val sy: Float get() = 1f + 0.1f * stretchV
+
+              fun toJson(dex: String? = null): String {
+                  val base = String.format(Locale.US, "\"sat\":%.2f,\"sx\":%.2f,\"sy\":%.2f,\"render\":%d", sat, sx, sy, renderLong)
+                  return "{" + base + (if (dex != null) ",\"dex\":\"$dex\"" else "") + "}"
+              }
+
+              fun summary(): String {
+                  val res = if (renderLong == 0) "natif" else "$renderLong px"
+                  return String.format(Locale.US, "Sat x%.1f · V +%d%% · H +%d%% · %s", sat, stretchV * 10, stretchH * 10, res)
+              }
+          }
+
+          enum class Step(val label: String) {
+              READ("Analyse de l'APK"),
+              MANIFEST("Injection du module"),
+              WRITE("Écriture de l'APK"),
+              SIGN("Signature"),
+              DONE("Terminé")
+          }
+
+          class PatchResult(val file: File, val millis: Long, val sizeBytes: Long, val alreadyPatched: Boolean)
+
+          object PatchEngine {
+              private const val CONFIG = "assets/apkforge.json"
+
+              fun exportDir(ctx: Context): File {
+                  val d = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "exports")
+                  d.mkdirs()
+                  return d
+              }
+
+              private fun nextDexName(zip: ApkZip): String {
+                  val re = Regex("^classes(\\d*)\\.dex$")
+                  var max = 0
+                  for (e in zip.entries()) {
+                      val m = re.find(e.name) ?: continue
+                      val n = m.groupValues[1].ifEmpty { "1" }.toInt()
+                      if (n > max) max = n
+                  }
+                  return "classes${max + 1}.dex"
+              }
+
+              fun run(ctx: Context, input: File, output: File, s: TweakSettings, onProgress: (Step, Float) -> Unit): PatchResult {
+                  val t0 = System.nanoTime()
+                  onProgress(Step.READ, 0.01f)
+                  var already = false
+                  val tmp = File(output.parentFile, output.name + ".tmp")
+                  ApkZip(input).use { zip ->
+                      val manifest = zip.find("AndroidManifest.xml")
+                          ?: error("AndroidManifest.xml introuvable : ce n'est pas un APK simple (XAPK/APKS non pris en charge).")
+                      already = zip.find(CONFIG) != null
+                      val replace = HashMap<String, ByteArray>()
+                      val add = LinkedHashMap<String, ByteArray>()
+                      val hook = ctx.assets.open("hook.dex").use { it.readBytes() }
+                      onProgress(Step.READ, 0.05f)
+                      if (already) {
+                          var dexName: String? = null
+                          try {
+                              val old = String(zip.read(zip.find(CONFIG)!!), Charsets.UTF_8)
+                              dexName = org.json.JSONObject(old).optString("dex", "").ifEmpty { null }
+                          } catch (e: Exception) { }
+                          if (dexName != null && zip.find(dexName) != null) replace[dexName] = hook
+                          replace[CONFIG] = s.toJson(dexName).toByteArray(Charsets.UTF_8)
+                      } else {
+                          onProgress(Step.MANIFEST, 0.06f)
+                          replace["AndroidManifest.xml"] = AxmlPatcher.addProvider(zip.read(manifest), "patch.TweakProvider", ".apkforge")
+                          val dexName = nextDexName(zip)
+                          add[dexName] = hook
+                          add[CONFIG] = s.toJson(dexName).toByteArray(Charsets.UTF_8)
+                          onProgress(Step.MANIFEST, 0.10f)
+                      }
+                      zip.write(tmp, replace, add) { done, total ->
+                          onProgress(Step.WRITE, 0.10f + 0.70f * (done.toFloat() / maxOf(1L, total).toFloat()))
+                      }
+                  }
+                  onProgress(Step.SIGN, 0.80f)
+                  sign(ctx, tmp, output)
+                  tmp.delete()
+                  onProgress(Step.DONE, 1f)
+                  return PatchResult(output, (System.nanoTime() - t0) / 1_000_000, output.length(), already)
+              }
+
+              private fun sign(ctx: Context, unsigned: File, signed: File) {
+                  val keyBytes = ctx.assets.open("sign.key.pk8").use { it.readBytes() }
+                  val certBytes = ctx.assets.open("sign.cert.der").use { it.readBytes() }
+                  val key = KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(keyBytes))
+                  val cert = CertificateFactory.getInstance("X.509").generateCertificate(ByteArrayInputStream(certBytes)) as X509Certificate
+                  val cfg = ApkSigner.SignerConfig.Builder("forge", key, listOf(cert)).build()
+                  if (signed.exists()) signed.delete()
+                  ApkSigner.Builder(listOf(cfg))
+                      .setInputApk(unsigned)
+                      .setOutputApk(signed)
+                      .setMinSdkVersion(24)
+                      .setV1SigningEnabled(true)
+                      .setV2SigningEnabled(true)
+                      .setV3SigningEnabled(true)
+                      .build()
+                      .sign()
+              }
+          }
+          FORGE_EOF_12
+          mkdir -p app/src/main/java/com/apkforge
+          cat > app/src/main/java/com/apkforge/MainActivity.kt <<'FORGE_EOF_13'
+          package com.apkforge
+
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.provider.OpenableColumns
+          import android.provider.Settings
+          import android.widget.Toast
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.BorderStroke
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.ColumnScope
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.systemBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.Card
+          import androidx.compose.material3.CardDefaults
+          import androidx.compose.material3.FilterChip
+          import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.Slider
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.DisposableEffect
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.ColorFilter
+          import androidx.compose.ui.graphics.ColorMatrix
+          import androidx.compose.ui.graphics.graphicsLayer
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalView
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.core.content.FileProvider
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.File
+          import java.util.Locale
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+
+          private const val APK_MIME = "application/vnd.android.package-archive"
+
+          private val ForgeColors = darkColorScheme(
+              primary = Color(0xFF8CF0C4), onPrimary = Color(0xFF00382A),
+              secondary = Color(0xFFFFB86B), tertiary = Color(0xFF9DB7FF),
+              background = Color(0xFF0B0F14), onBackground = Color(0xFFE6EDF3),
+              surface = Color(0xFF121821), onSurface = Color(0xFFE6EDF3),
+              surfaceVariant = Color(0xFF1B2430), onSurfaceVariant = Color(0xFFA7B4C2),
+              outline = Color(0xFF3A4757), error = Color(0xFFFF8A80)
+          )
+
+          private val PRESETS = listOf(
+              "Normal" to TweakSettings(),
+              "Vif" to TweakSettings(sat = 1.4f),
+              "Fluide" to TweakSettings(renderLong = 720),
+              "Zoom" to TweakSettings(sat = 1.2f, stretchV = 1, stretchH = 1),
+              "Max" to TweakSettings(sat = 1.8f, stretchV = 2, stretchH = 2, renderLong = 900)
+          )
+          private val RES_OPTIONS = listOf(0, 1080, 900, 720, 540, 360)
+
+          class PickedApk(val file: File, val displayName: String, val label: String, val pkg: String, val size: Long, val alreadyPatched: Boolean)
+          class HistItem(val name: String, val ms: Long, val size: Long, val summary: String, val path: String)
+
+          object History {
+              fun load(p: android.content.SharedPreferences): List<HistItem> {
+                  val out = ArrayList<HistItem>()
+                  try {
+                      val a = JSONArray(p.getString("history", "[]"))
+                      for (i in 0 until a.length()) {
+                          val o = a.getJSONObject(i)
+                          out.add(HistItem(o.getString("name"), o.getLong("ms"), o.getLong("size"), o.getString("sum"), o.getString("path")))
+                      }
+                  } catch (e: Exception) { }
+                  return out
+              }
+
+              fun add(p: android.content.SharedPreferences, h: HistItem) {
+                  val all = ArrayList<HistItem>()
+                  all.add(h)
+                  all.addAll(load(p))
+                  val a = JSONArray()
+                  for (x in all.take(8)) {
+                      a.put(JSONObject().put("name", x.name).put("ms", x.ms).put("size", x.size).put("sum", x.summary).put("path", x.path))
+                  }
+                  p.edit().putString("history", a.toString()).apply()
+              }
+          }
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+                  setContent { MaterialTheme(colorScheme = ForgeColors) { ForgeApp() } }
+              }
+          }
+
+          private fun fmtTime(ms: Long): String = String.format(Locale.US, "%02d:%04.1f", ms / 60000, (ms % 60000) / 1000.0)
+          private fun fmtSize(b: Long): String = if (b >= 1_000_000) String.format(Locale.US, "%.1f Mo", b / 1e6) else "${b / 1000} Ko"
+
+          private fun importApk(ctx: Context, uri: Uri): PickedApk {
+              val name = ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                  if (c.moveToFirst()) c.getString(0) else null
+              } ?: "app.apk"
+              val dst = File(ctx.cacheDir, "input.apk")
+              val input = ctx.contentResolver.openInputStream(uri) ?: error("Fichier illisible")
+              input.use { i -> dst.outputStream().use { o -> i.copyTo(o, 256 * 1024) } }
+              val already = try {
+                  ApkZip(dst).use { z ->
+                      if (z.find("AndroidManifest.xml") == null) throw IllegalStateException("AndroidManifest.xml absent")
+                      z.find("assets/apkforge.json") != null
+                  }
+              } catch (e: Exception) {
+                  throw IllegalStateException("Ce fichier n'est pas un APK simple (les XAPK / APKS ne sont pas pris en charge).")
+              }
+              val pm = ctx.packageManager
+              var label = name
+              var pkg = ""
+              val info = pm.getPackageArchiveInfo(dst.path, 0)
+              if (info != null) {
+                  pkg = info.packageName ?: ""
+                  info.applicationInfo?.let { ai ->
+                      ai.sourceDir = dst.path
+                      ai.publicSourceDir = dst.path
+                      label = ai.loadLabel(pm).toString()
+                  }
+              }
+              return PickedApk(dst, name, label, pkg, dst.length(), already)
+          }
+
+          private fun installApk(ctx: Context, f: File) {
+              if (!ctx.packageManager.canRequestPackageInstalls()) {
+                  Toast.makeText(ctx, "Autorise d'abord l'installation depuis cette appli, puis réessaie.", Toast.LENGTH_LONG).show()
+                  ctx.startActivity(
+                      Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + ctx.packageName)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  )
+                  return
+              }
+              val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
+              ctx.startActivity(
+                  Intent(Intent.ACTION_VIEW).setDataAndType(uri, APK_MIME)
+                      .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+              )
+          }
+
+          private fun shareApk(ctx: Context, f: File) {
+              val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
+              val i = Intent(Intent.ACTION_SEND).setType(APK_MIME).putExtra(Intent.EXTRA_STREAM, uri)
+                  .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+              ctx.startActivity(Intent.createChooser(i, "Partager l'APK").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+          }
+
+          private fun saveToDownloads(ctx: Context, f: File): Boolean {
+              if (Build.VERSION.SDK_INT < 29) return false
+              val cv = ContentValues().apply {
+                  put(MediaStore.Downloads.DISPLAY_NAME, f.name)
+                  put(MediaStore.Downloads.MIME_TYPE, APK_MIME)
+                  put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+              }
+              val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv) ?: return false
+              ctx.contentResolver.openOutputStream(uri)?.use { o -> f.inputStream().use { it.copyTo(o) } }
+              return true
+          }
+
+          @Composable
+          private fun SectionCard(title: String, badge: String, content: @Composable ColumnScope.() -> Unit) {
+              Card(
+                  shape = RoundedCornerShape(24.dp),
+                  colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                  border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
+                  modifier = Modifier.fillMaxWidth()
+              ) {
+                  Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                          Box(
+                              Modifier.size(28.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+                              contentAlignment = Alignment.Center
+                          ) { Text(badge, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
+                          Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                      }
+                      content()
+                  }
+              }
+          }
+
+          @Composable
+          private fun LabeledSlider(label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, steps: Int, onChange: (Float) -> Unit) {
+              Column {
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                      Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      Text(valueText, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                  }
+                  Slider(value = value, onValueChange = onChange, valueRange = range, steps = steps)
+              }
+          }
+
+          @Composable
+          private fun Strip(colors: List<Color>, filter: ColorFilter?, label: String) {
+              Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                  Text(label, fontSize = 12.sp, modifier = Modifier.width(44.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Canvas(Modifier.weight(1f).height(26.dp).clip(RoundedCornerShape(8.dp))) {
+                      drawRect(brush = Brush.horizontalGradient(colors), colorFilter = filter)
+                  }
+              }
+          }
+
+          @Composable
+          private fun SatPreview(sat: Float) {
+              val base = listOf(Color(0xFFB8645C), Color(0xFFC9A04F), Color(0xFF7FA85A), Color(0xFF4F9AA8), Color(0xFF5A6FB8), Color(0xFF9A5AB0))
+              val filter = remember(sat) { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(sat) }) }
+              Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                  Strip(base, null, "Avant")
+                  Strip(base, filter, "Après")
+              }
+          }
+
+          @Composable
+          private fun StretchPreview(sx: Float, sy: Float) {
+              val shape = RoundedCornerShape(14.dp)
+              Box(
+                  Modifier.width(72.dp).height(128.dp).clip(shape)
+                      .border(2.dp, MaterialTheme.colorScheme.outline, shape).background(Color(0xFF0E1A26))
+              ) {
+                  Canvas(Modifier.fillMaxSize()) {
+                      val w = size.width
+                      val h = size.height
+                      val lane = w / 3f
+                      for (i in 0..2) {
+                          drawRect(Color(if (i == 1) 0xFF22384D else 0xFF1A2B3C), Offset(i * lane, 0f), Size(lane - 2f, h))
+                      }
+                      val pw = lane * 0.5f * sx
+                      val ph = h * 0.18f * sy
+                      drawRect(Color(0xFF8CF0C4), Offset(w / 2f - pw / 2f, h * 0.8f - ph), Size(pw, ph))
+                      val r = lane * 0.18f
+                      drawOval(Color(0xFFFFB86B), Offset(lane * 0.5f - r * sx, h * 0.3f - r * sy), Size(2f * r * sx, 2f * r * sy))
+                  }
+              }
+          }
+
+          @Composable
+          private fun ForgeApp() {
+              val ctx = LocalContext.current
+              val view = LocalView.current
+              val scope = rememberCoroutineScope()
+              val prefs = remember { ctx.getSharedPreferences("forge", Context.MODE_PRIVATE) }
+
+              var settings by remember {
+                  mutableStateOf(TweakSettings(prefs.getFloat("sat", 1f), prefs.getInt("v", 0), prefs.getInt("h", 0), prefs.getInt("res", 0)))
+              }
+              var picked by remember { mutableStateOf<PickedApk?>(null) }
+              var importing by remember { mutableStateOf(false) }
+              var running by remember { mutableStateOf(false) }
+              var step by remember { mutableStateOf(Step.READ) }
+              var progress by remember { mutableStateOf(0f) }
+              var elapsedMs by remember { mutableStateOf(0L) }
+              var result by remember { mutableStateOf<PatchResult?>(null) }
+              var error by remember { mutableStateOf<String?>(null) }
+              var history by remember { mutableStateOf(History.load(prefs)) }
+
+              fun update(s: TweakSettings) {
+                  settings = s
+                  prefs.edit().putFloat("sat", s.sat).putInt("v", s.stretchV).putInt("h", s.stretchH).putInt("res", s.renderLong).apply()
+              }
+
+              DisposableEffect(running) {
+                  view.keepScreenOn = running
+                  onDispose { view.keepScreenOn = false }
+              }
+
+              val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+                  if (uri != null) {
+                      importing = true
+                      error = null
+                      result = null
+                      scope.launch {
+                          try {
+                              picked = withContext(Dispatchers.IO) { importApk(ctx, uri) }
+                          } catch (e: Exception) {
+                              picked = null
+                              error = e.message ?: "Import impossible"
+                          }
+                          importing = false
+                      }
+                  }
+              }
+
+              fun startExport() {
+                  val p = picked ?: return
+                  val s = settings
+                  running = true
+                  result = null
+                  error = null
+                  progress = 0f
+                  step = Step.READ
+                  elapsedMs = 0L
+                  scope.launch {
+                      val t0 = System.nanoTime()
+                      val ticker = launch {
+                          while (true) {
+                              elapsedMs = (System.nanoTime() - t0) / 1_000_000
+                              delay(100)
+                          }
+                      }
+                      try {
+                          val safe = p.label.replace(Regex("[^A-Za-z0-9]+"), "_").trim('_').ifEmpty { "app" }
+                          val out = File(PatchEngine.exportDir(ctx), "${safe}_forge_${System.currentTimeMillis() / 1000}.apk")
+                          val r = withContext(Dispatchers.IO) {
+                              PatchEngine.run(ctx, p.file, out, s) { st, pr -> step = st; progress = pr }
+                          }
+                          result = r
+                          elapsedMs = r.millis
+                          History.add(prefs, HistItem(p.label, r.millis, r.sizeBytes, s.summary(), r.file.path))
+                          history = History.load(prefs)
+                      } catch (e: Throwable) {
+                          error = "Échec : " + (e.message ?: e.javaClass.simpleName)
+                      }
+                      ticker.cancel()
+                      running = false
+                  }
+              }
+
+              Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                  Column(
+                      Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(16.dp),
+                      verticalArrangement = Arrangement.spacedBy(14.dp)
+                  ) {
+                      Box(
+                          Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp))
+                              .background(Brush.linearGradient(listOf(Color(0xFF123B34), Color(0xFF1B2A55)))).padding(22.dp)
+                      ) {
+                          Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                              Text("APK Forge", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                              Text("Résolution étirée · saturation, directement dans l'APK.", color = Color(0xFFB9C7D6), fontSize = 14.sp)
+                          }
+                      }
+
+                      SectionCard("Choisir l'APK", "1") {
+                          Button(
+                              onClick = { picker.launch(arrayOf("*/*")) },
+                              enabled = !running && !importing,
+                              modifier = Modifier.fillMaxWidth().height(52.dp),
+                              shape = RoundedCornerShape(16.dp)
+                          ) { Text(if (picked == null) "Importer un APK" else "Changer d'APK", fontWeight = FontWeight.Bold) }
+                          if (importing) {
+                              LinearProgressIndicator(Modifier.fillMaxWidth())
+                              Text("Lecture du fichier…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          }
+                          picked?.let { p ->
+                              Text(p.label, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                              Text("${p.pkg} · ${fmtSize(p.size)}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                              if (p.alreadyPatched) {
+                                  Text("Déjà modifié : seuls les réglages seront remplacés.", color = MaterialTheme.colorScheme.secondary, fontSize = 13.sp)
+                              }
+                          }
+                      }
+
+                      SectionCard("Réglages", "2") {
+                          Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              for ((name, preset) in PRESETS) {
+                                  FilterChip(selected = settings == preset, onClick = { update(preset) }, label = { Text(name) })
+                              }
+                          }
+
+                          LabeledSlider(
+                              "Saturation", String.format(Locale.US, "x%.1f", settings.sat), settings.sat, 1f..2.5f, 14
+                          ) { update(settings.copy(sat = (it * 10f).roundToInt() / 10f)) }
+                          SatPreview(settings.sat)
+
+                          Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                              StretchPreview(settings.sx, settings.sy)
+                              Column(Modifier.weight(1f)) {
+                                  LabeledSlider("Étirement vertical", "+${settings.stretchV * 10} %", settings.stretchV.toFloat(), 0f..3f, 2) {
+                                      update(settings.copy(stretchV = it.roundToInt()))
+                                  }
+                                  LabeledSlider("Étirement horizontal", "+${settings.stretchH * 10} %", settings.stretchH.toFloat(), 0f..3f, 2) {
+                                      update(settings.copy(stretchH = it.roundToInt()))
+                                  }
+                              }
+                          }
+
+                          Text(
+                              "Étirement : le jeu est calculé dans une résolution plus étroite / basse, puis étiré sur tout l'écran (comme la résolution étirée).",
+                              fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                          )
+                          Text("Résolution de rendu (côté long)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              for (r in RES_OPTIONS) {
+                                  FilterChip(
+                                      selected = settings.renderLong == r,
+                                      onClick = { update(settings.copy(renderLong = r)) },
+                                      label = { Text(if (r == 0) "Natif" else "$r px") }
+                                  )
+                              }
+                          }
+                          val dm = ctx.resources.displayMetrics
+                          val sw = dm.widthPixels
+                          val sh = dm.heightPixels
+                          val longSide = max(sw, sh)
+                          val f = if (settings.renderLong in 1 until longSide) settings.renderLong.toFloat() / longSide else 1f
+                          val bw = (sw * f / settings.sx).roundToInt()
+                          val bh = (sh * f / settings.sy).roundToInt()
+                          if (bw < sw || bh < sh) {
+                              val saved = ((1f - (bw.toFloat() * bh) / (sw.toFloat() * sh)) * 100).roundToInt()
+                              Text(
+                                  "Rendu ≈ ${bw}×${bh} au lieu de ${sw}×${sh} (−$saved % de pixels, plus de FPS).",
+                                  fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                              )
+                          }
+                      }
+
+                      SectionCard("Export", "3") {
+                          if (!running) {
+                              Button(
+                                  onClick = { startExport() },
+                                  enabled = picked != null && !importing,
+                                  modifier = Modifier.fillMaxWidth().height(56.dp),
+                                  shape = RoundedCornerShape(18.dp)
+                              ) {
+                                  Text(
+                                      if (picked?.alreadyPatched == true) "Mettre à jour les réglages" else "Exporter l'APK modifié",
+                                      fontWeight = FontWeight.Bold, fontSize = 16.sp
+                                  )
+                              }
+                          } else {
+                              Text(step.label, fontWeight = FontWeight.SemiBold)
+                              if (step == Step.SIGN) {
+                                  LinearProgressIndicator(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)))
+                              } else {
+                                  LinearProgressIndicator(
+                                      progress = { progress },
+                                      modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp))
+                                  )
+                              }
+                              val eta = if (progress > 0.12f && progress < 0.99f && step != Step.SIGN) ((elapsedMs * (1f - progress) / progress) / 1000f).roundToInt() else -1
+                              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                  Text("⏱ " + fmtTime(elapsedMs), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                  Text(if (eta >= 0) "≈ $eta s restantes" else "${(progress * 100).roundToInt()} %", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                              }
+                          }
+                          error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                          result?.let { r ->
+                              Text(
+                                  "✅ Terminé en ${fmtTime(r.millis)} · ${fmtSize(r.sizeBytes)}",
+                                  fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary
+                              )
+                              Text("Désinstalle d'abord le jeu d'origine : l'APK modifié est signé avec une autre clé.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                  Button(onClick = { installApk(ctx, r.file) }, shape = RoundedCornerShape(14.dp)) { Text("Installer") }
+                                  OutlinedButton(onClick = { shareApk(ctx, r.file) }, shape = RoundedCornerShape(14.dp)) { Text("Partager") }
+                                  if (Build.VERSION.SDK_INT >= 29) {
+                                      OutlinedButton(onClick = {
+                                          val ok = try { saveToDownloads(ctx, r.file) } catch (e: Exception) { false }
+                                          Toast.makeText(ctx, if (ok) "Copié dans Téléchargements" else "Copie impossible", Toast.LENGTH_SHORT).show()
+                                      }, shape = RoundedCornerShape(14.dp)) { Text("Télécharg.") }
+                                  }
+                              }
+                          }
+                      }
+
+                      if (history.isNotEmpty()) {
+                          SectionCard("Historique", "★") {
+                              for (h in history) {
+                                  val f = File(h.path)
+                                  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                      Column(Modifier.weight(1f)) {
+                                          Text(h.name, fontWeight = FontWeight.SemiBold)
+                                          Text("${h.summary} · ${fmtTime(h.ms)} · ${fmtSize(h.size)}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                      }
+                                      if (f.exists()) {
+                                          OutlinedButton(onClick = { installApk(ctx, f) }, shape = RoundedCornerShape(12.dp)) { Text("Installer") }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      Box(Modifier.height(24.dp))
+                  }
+              }
+          }
+          FORGE_EOF_13
+          mkdir -p hook/patch
+          cat > hook/patch/TweakProvider.java <<'FORGE_EOF_14'
+          package patch;
+
+          import android.app.Activity;
+          import android.app.Application;
+          import android.content.ContentProvider;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.database.Cursor;
+          import android.graphics.ColorMatrix;
+          import android.graphics.ColorMatrixColorFilter;
+          import android.graphics.Paint;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.SurfaceView;
+          import android.view.TextureView;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Map;
+          import java.util.WeakHashMap;
+          import org.json.JSONObject;
+
+          /** Module injecté par APK Forge : lit assets/apkforge.json et applique résolution, étirement et saturation. */
+          public class TweakProvider extends ContentProvider {
+              static float sat = 1f, sx = 1f, sy = 1f;
+              static int render = 0;
+
+              @Override public boolean onCreate() {
+                  try {
+                      Context c = getContext();
+                      load(c);
+                      Application app = (c instanceof Application) ? (Application) c : (Application) c.getApplicationContext();
+                      app.registerActivityLifecycleCallbacks(new Callbacks());
+                  } catch (Throwable t) { /* ne jamais faire planter le jeu */ }
+                  return true;
+              }
+
+              static void load(Context c) throws Exception {
+                  InputStream in = c.getAssets().open("apkforge.json");
+                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                  byte[] buf = new byte[1024]; int n;
+                  while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                  in.close();
+                  JSONObject j = new JSONObject(new String(bo.toByteArray(), "UTF-8"));
+                  sat = (float) j.optDouble("sat", 1.0);
+                  sx = (float) j.optDouble("sx", 1.0);
+                  sy = (float) j.optDouble("sy", 1.0);
+                  render = j.optInt("render", 0);
+              }
+
+              static final class Callbacks implements Application.ActivityLifecycleCallbacks {
+                  public void onActivityCreated(Activity a, Bundle b) { schedule(a); }
+                  public void onActivityStarted(Activity a) {}
+                  public void onActivityResumed(Activity a) { schedule(a); }
+                  public void onActivityPaused(Activity a) {}
+                  public void onActivityStopped(Activity a) {}
+                  public void onActivitySaveInstanceState(Activity a, Bundle b) {}
+                  public void onActivityDestroyed(Activity a) {}
+              }
+
+              static void schedule(final Activity a) {
+                  final Handler h = new Handler(Looper.getMainLooper());
+                  h.post(new Runnable() {
+                      int tries = 0, checks = 0;
+                      public void run() {
+                          try {
+                              List<View> found = new ArrayList<View>();
+                              collect(a.getWindow().getDecorView(), found);
+                              View best = null; int area = 0;
+                              for (View v : found) {
+                                  int s = v.getWidth() * v.getHeight();
+                                  if (s > area) { area = s; best = v; }
+                              }
+                              if (best != null) {
+                                  tweak(best);
+                                  // Unity peut remettre sa taille d'origine : on revérifie pendant ~12 s
+                                  if (checks++ < 12) h.postDelayed(this, 1000);
+                              } else if (tries++ < 80) {
+                                  h.postDelayed(this, 250);
+                              }
+                          } catch (Throwable t) { }
+                      }
+                  });
+              }
+
+              static void collect(View v, List<View> out) {
+                  if (v instanceof SurfaceView || v instanceof TextureView) out.add(v);
+                  if (v instanceof ViewGroup) {
+                      ViewGroup g = (ViewGroup) v;
+                      for (int i = 0; i < g.getChildCount(); i++) collect(g.getChildAt(i), out);
+                  }
+              }
+
+              /**
+               * Résolution étirée : le jeu dessine dans un buffer plus petit / d'un autre ratio, et Android l'étire
+               * sur toute la vue (aucune transformation de vue, donc aucune bande noire).
+               */
+              static void tweak(View v) {
+                  if (!(v instanceof SurfaceView)) {
+                      if (sat != 1f) { // TextureView : le filtre de saturation fonctionne
+                          ColorMatrix cm = new ColorMatrix(); cm.setSaturation(sat);
+                          Paint p = new Paint(); p.setColorFilter(new ColorMatrixColorFilter(cm));
+                          v.setLayerType(View.LAYER_TYPE_HARDWARE, p);
+                      }
+                      return;
+                  }
+                  SurfaceView sv = (SurfaceView) v;
+                  int w = sv.getWidth(), h = sv.getHeight();
+                  if (w <= 0 || h <= 0) return;
+                  float f = 1f;
+                  if (render > 0) {
+                      int longSide = Math.max(w, h);
+                      if (render < longSide) f = (float) render / longSide;
+                  }
+                  int tw = Math.max(1, Math.round(w * f / sx));
+                  int th = Math.max(1, Math.round(h * f / sy));
+                  if (tw >= w && th >= h) return;
+                  android.graphics.Rect cur = sv.getHolder().getSurfaceFrame();
+                  if (cur.width() != tw || cur.height() != th) sv.getHolder().setFixedSize(tw, th);
+              }
+
+              @Override public Cursor query(Uri u, String[] p, String s, String[] a, String o) { return null; }
+              @Override public String getType(Uri u) { return null; }
+              @Override public Uri insert(Uri u, ContentValues v) { return null; }
+              @Override public int delete(Uri u, String s, String[] a) { return 0; }
+              @Override public int update(Uri u, ContentValues v, String s, String[] a) { return 0; }
+          }
+          FORGE_EOF_14
+
+      - name: Compiler le module hook en dex
+        run: |
+          set -e
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          AJ="$ANDROID_HOME/platforms/android-34/android.jar"
+          mkdir -p hook/cls hook/out app/src/main/assets
+          javac --release 8 -cp "$AJ" -d hook/cls hook/patch/TweakProvider.java
+          "$BT/d8" --release --min-api 21 --lib "$AJ" --output hook/out $(find hook/cls -name '*.class')
+          cp hook/out/classes.dex app/src/main/assets/hook.dex
+
+      - name: Restaurer les clés de signature
+        uses: actions/cache@v4
+        with:
+          path: |
+            signing
+            ~/.android/debug.keystore
+          key: apkforge-keys-v1
+
+      - name: Préparer la clé qui signera les APK exportés
+        run: |
+          set -e
+          if [ ! -f signing/key.pk8 ]; then
+            mkdir -p signing
+            openssl req -x509 -newkey rsa:2048 -nodes -keyout signing/key.pem -out signing/cert.pem -days 36500 -subj "/CN=APK Forge"
+            openssl pkcs8 -topk8 -nocrypt -in signing/key.pem -outform DER -out signing/key.pk8
+            openssl x509 -in signing/cert.pem -outform DER -out signing/cert.der
+          fi
+          cp signing/key.pk8 app/src/main/assets/sign.key.pk8
+          cp signing/cert.der app/src/main/assets/sign.cert.der
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Compiler l'appli
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: APK-Forge
+          path: app/build/outputs/apk/debug/app-debug.apk
