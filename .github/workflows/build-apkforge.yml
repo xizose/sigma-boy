@@ -99,6 +99,11 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <application
                   android:allowBackup="false"
                   android:icon="@mipmap/ic_launcher"
@@ -111,6 +116,10 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <service
+                      android:name=".RecorderService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection|microphone" />
                   <provider
                       android:name="androidx.core.content.FileProvider"
                       android:authorities="${applicationId}.files"
@@ -625,13 +634,20 @@ jobs:
               val sat: Float = 1f,
               val stretchV: Int = 0,
               val stretchH: Int = 0,
-              val renderLong: Int = 0
+              val renderLong: Int = 0,
+              val showFps: Boolean = false,
+              val unlock: Boolean = false,
+              val timer: Boolean = false,
+              val touchFix: Boolean = false
           ) {
+              fun core() = copy(showFps = false, unlock = false, timer = false, touchFix = false)
+
               val sx: Float get() = 1f + 0.1f * stretchH
               val sy: Float get() = 1f + 0.1f * stretchV
 
               fun toJson(dex: String? = null): String {
-                  val base = String.format(Locale.US, "\"sat\":%.2f,\"sx\":%.2f,\"sy\":%.2f,\"render\":%d", sat, sx, sy, renderLong)
+                  val b = { x: Boolean -> if (x) 1 else 0 }
+                  val base = String.format(Locale.US, "\"sat\":%.2f,\"sx\":%.2f,\"sy\":%.2f,\"render\":%d,\"fps\":%d,\"unlock\":%d,\"timer\":%d,\"touch\":%d", sat, sx, sy, renderLong, b(showFps), b(unlock), b(timer), b(touchFix))
                   return "{" + base + (if (dex != null) ",\"dex\":\"$dex\"" else "") + "}"
               }
 
@@ -734,7 +750,289 @@ jobs:
           }
           FORGE_EOF_12
           mkdir -p app/src/main/java/com/apkforge
-          cat > app/src/main/java/com/apkforge/MainActivity.kt <<'FORGE_EOF_13'
+          cat > app/src/main/java/com/apkforge/Recorder.kt <<'FORGE_EOF_13'
+          package com.apkforge
+
+          import android.Manifest
+          import android.app.Activity
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.content.pm.ServiceInfo
+          import android.graphics.drawable.Icon
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.MediaRecorder
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Environment
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.provider.MediaStore
+          import android.widget.Toast
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.FilterChip
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.Switch
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.delay
+          import java.io.File
+          import kotlin.math.max
+          import kotlin.math.min
+
+          /** Service d'enregistrement d'écran (MediaProjection + MediaRecorder, encodage matériel). */
+          class RecorderService : Service() {
+              private var projection: MediaProjection? = null
+              private var recorder: MediaRecorder? = null
+              private var display: VirtualDisplay? = null
+              private var outFile: File? = null
+
+              companion object {
+                  @Volatile var active = false
+                  const val ACTION_STOP = "com.apkforge.STOP"
+                  private const val CH = "forge_rec"
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              private fun toast(t: String) { Handler(Looper.getMainLooper()).post { Toast.makeText(applicationContext, t, Toast.LENGTH_LONG).show() } }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent == null || intent.action == ACTION_STOP) { stopRecording(); return START_NOT_STICKY }
+                  val audio = intent.getBooleanExtra("audio", false) &&
+                      checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                  goForeground(audio)
+                  try {
+                      startRecording(intent, audio)
+                  } catch (e: Exception) {
+                      toast("Enregistrement impossible : " + (e.message ?: e.javaClass.simpleName))
+                      cleanup(); stopSelf()
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun goForeground(audio: Boolean) {
+                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(NotificationChannel(CH, "Enregistrement", NotificationManager.IMPORTANCE_LOW))
+                  val stop = PendingIntent.getService(this, 1, Intent(this, RecorderService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
+                  val n = Notification.Builder(this, CH)
+                      .setContentTitle("APK Forge").setContentText("Enregistrement en cours…")
+                      .setSmallIcon(android.R.drawable.ic_media_play).setOngoing(true)
+                      .addAction(Notification.Action.Builder(Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "Arrêter", stop).build())
+                      .build()
+                  var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                  if (audio) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                  startForeground(42, n, type)
+              }
+
+              @Suppress("DEPRECATION")
+              private fun startRecording(i: Intent, audio: Boolean) {
+                  val code = i.getIntExtra("code", 0)
+                  val data = i.getParcelableExtra<Intent>("data") ?: error("Autorisation manquante")
+                  val target = i.getIntExtra("h", 1080)
+                  val fps = i.getIntExtra("fps", 60)
+                  val mbps = i.getIntExtra("mbps", 16)
+                  val hevc = i.getBooleanExtra("hevc", false)
+
+                  val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  val proj = mpm.getMediaProjection(code, data)
+                  proj.registerCallback(object : MediaProjection.Callback() { override fun onStop() { stopRecording() } }, Handler(Looper.getMainLooper()))
+                  projection = proj
+
+                  val dm = resources.displayMetrics
+                  val shortSide = min(dm.widthPixels, dm.heightPixels)
+                  val scale = if (target <= 0) 1f else min(1f, target.toFloat() / shortSide)
+                  val w = ((dm.widthPixels * scale).toInt()) and 1.inv()
+                  val h = ((dm.heightPixels * scale).toInt()) and 1.inv()
+
+                  val dir = getExternalFilesDir("recordings") ?: filesDir
+                  dir.mkdirs()
+                  val f = File(dir, "forge_" + System.currentTimeMillis() / 1000 + ".mp4")
+                  outFile = f
+
+                  val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
+                  if (audio) r.setAudioSource(MediaRecorder.AudioSource.MIC)
+                  r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+                  r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                  r.setVideoEncoder(if (hevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264)
+                  if (audio) {
+                      r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                      r.setAudioEncodingBitRate(128_000)
+                      r.setAudioSamplingRate(44_100)
+                  }
+                  r.setVideoSize(w, h)
+                  r.setVideoFrameRate(fps)
+                  r.setVideoEncodingBitRate(mbps * 1_000_000)
+                  r.setOutputFile(f.path)
+                  r.prepare()
+                  recorder = r
+                  display = proj.createVirtualDisplay("forge", w, h, dm.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, null)
+                  r.start()
+                  active = true
+              }
+
+              private fun cleanup() {
+                  try { recorder?.stop() } catch (e: Exception) { }
+                  try { recorder?.release() } catch (e: Exception) { }
+                  try { display?.release() } catch (e: Exception) { }
+                  try { projection?.stop() } catch (e: Exception) { }
+                  recorder = null; display = null; projection = null
+                  active = false
+              }
+
+              private fun stopRecording() {
+                  val f = outFile
+                  val was = active
+                  cleanup()
+                  if (was && f != null && f.exists()) {
+                      val ok = try { saveToMovies(f) } catch (e: Exception) { false }
+                      toast(if (ok) "Enregistrement sauvegardé dans Films/APK Forge" else "Enregistrement : " + f.path)
+                  }
+                  stopForeground(STOP_FOREGROUND_REMOVE)
+                  stopSelf()
+              }
+
+              private fun saveToMovies(f: File): Boolean {
+                  if (Build.VERSION.SDK_INT < 29) return false
+                  val cv = ContentValues().apply {
+                      put(MediaStore.Video.Media.DISPLAY_NAME, f.name)
+                      put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                      put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/APK Forge")
+                  }
+                  val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv) ?: return false
+                  contentResolver.openOutputStream(uri)?.use { o -> f.inputStream().use { it.copyTo(o) } }
+                  f.delete()
+                  return true
+              }
+
+              override fun onDestroy() { cleanup(); super.onDestroy() }
+          }
+
+          /** Interrupteurs des outils intégrés au jeu. */
+          @Composable
+          fun ToolsCard(s: TweakSettings, onChange: (TweakSettings) -> Unit) {
+              SectionCard("Outils en jeu", "+") {
+                  ToolRow("Chrono Live Split", "Démarre quand la partie commence, s'arrête à la 1re pièce, repart à la partie suivante.", s.timer) { onChange(s.copy(timer = it)) }
+                  ToolRow("Compteur de FPS", "Affiche la fréquence de l'écran en haut du jeu.", s.showFps) { onChange(s.copy(showFps = it)) }
+                  ToolRow("Débloquer les FPS", "Demande l'écran le plus fluide (120 Hz si possible) et le mode performance.", s.unlock) { onChange(s.copy(unlock = it)) }
+                  ToolRow("Correction tactile", "À activer seulement si le tactile est décalé ou ne répond plus avec l'étirement.", s.touchFix) { onChange(s.copy(touchFix = it)) }
+              }
+          }
+
+          @Composable
+          private fun ToolRow(title: String, sub: String, checked: Boolean, onCheck: (Boolean) -> Unit) {
+              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                  androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+                      Text(title, fontWeight = FontWeight.SemiBold)
+                      Text(sub, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  }
+                  Switch(checked = checked, onCheckedChange = onCheck)
+              }
+          }
+
+          @Composable
+          fun RecorderCard() {
+              val ctx = LocalContext.current
+              var res by remember { mutableStateOf(1080) }
+              var fps by remember { mutableStateOf(60) }
+              var mbps by remember { mutableStateOf(16) }
+              var audio by remember { mutableStateOf(false) }
+              var hevc by remember { mutableStateOf(false) }
+              var rec by remember { mutableStateOf(RecorderService.active) }
+              LaunchedEffect(Unit) { while (true) { rec = RecorderService.active; delay(500) } }
+
+              val mpm = remember { ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager }
+              val projection = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+                  val d = r.data
+                  if (r.resultCode == Activity.RESULT_OK && d != null) {
+                      val i = Intent(ctx, RecorderService::class.java)
+                          .putExtra("code", r.resultCode).putExtra("data", d)
+                          .putExtra("h", res).putExtra("fps", fps).putExtra("mbps", mbps)
+                          .putExtra("audio", audio).putExtra("hevc", hevc)
+                      ctx.startForegroundService(i)
+                  }
+              }
+              val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+                  projection.launch(mpm.createScreenCaptureIntent())
+              }
+              fun begin() {
+                  val need = ArrayList<String>()
+                  if (audio && ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) need.add(Manifest.permission.RECORD_AUDIO)
+                  if (Build.VERSION.SDK_INT >= 33 && ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) need.add(Manifest.permission.POST_NOTIFICATIONS)
+                  if (need.isEmpty()) projection.launch(mpm.createScreenCaptureIntent()) else perms.launch(need.toTypedArray())
+              }
+
+              SectionCard("Enregistrement d'écran", "●") {
+                  Text("Qualité (côté court)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      for ((v, l) in listOf(480 to "480p", 720 to "720p", 1080 to "1080p", 0 to "Natif"))
+                          FilterChip(selected = res == v, onClick = { res = v }, label = { Text(l) })
+                  }
+                  Text("Débit vidéo", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      for ((v, l) in listOf(8 to "Éco 8 Mb/s", 16 to "Normal 16", 32 to "Max 32"))
+                          FilterChip(selected = mbps == v, onClick = { mbps = v }, label = { Text(l) })
+                  }
+                  Text("FPS", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      for (v in listOf(30, 60, 90, 120))
+                          FilterChip(selected = fps == v, onClick = { fps = v }, label = { Text("$v") })
+                  }
+                  Text("Codec", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      FilterChip(selected = !hevc, onClick = { hevc = false }, label = { Text("H.264") })
+                      FilterChip(selected = hevc, onClick = { hevc = true }, label = { Text("H.265 (plus léger)") })
+                  }
+                  ToolRow("Audio (micro)", "Enregistre aussi le micro.", audio) { audio = it }
+                  if (!rec) {
+                      Button(onClick = { begin() }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                          Text("Démarrer l'enregistrement", fontWeight = FontWeight.Bold)
+                      }
+                  } else {
+                      Button(
+                          onClick = { ctx.startService(Intent(ctx, RecorderService::class.java).setAction(RecorderService.ACTION_STOP)) },
+                          modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)
+                      ) { Text("⏹ Arrêter l'enregistrement", fontWeight = FontWeight.Bold) }
+                  }
+                  Text(
+                      "Lance l'enregistrement, ouvre le jeu, puis arrête-le depuis la notification. La vidéo est dans Films/APK Forge.",
+                      fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                  )
+              }
+          }
+          FORGE_EOF_13
+          mkdir -p app/src/main/java/com/apkforge
+          cat > app/src/main/java/com/apkforge/MainActivity.kt <<'FORGE_EOF_14'
           package com.apkforge
 
           import android.content.ContentValues
@@ -955,7 +1253,7 @@ jobs:
           }
 
           @Composable
-          private fun SectionCard(title: String, badge: String, content: @Composable ColumnScope.() -> Unit) {
+          internal fun SectionCard(title: String, badge: String, content: @Composable ColumnScope.() -> Unit) {
               Card(
                   shape = RoundedCornerShape(24.dp),
                   colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1037,7 +1335,8 @@ jobs:
               val prefs = remember { ctx.getSharedPreferences("forge", Context.MODE_PRIVATE) }
 
               var settings by remember {
-                  mutableStateOf(TweakSettings(prefs.getFloat("sat", 1f), prefs.getInt("v", 0), prefs.getInt("h", 0), prefs.getInt("res", 0)))
+                  mutableStateOf(TweakSettings(prefs.getFloat("sat", 1f), prefs.getInt("v", 0), prefs.getInt("h", 0), prefs.getInt("res", 0),
+                      prefs.getBoolean("fps", false), prefs.getBoolean("unlock", false), prefs.getBoolean("timer", false), prefs.getBoolean("touch", false)))
               }
               var picked by remember { mutableStateOf<PickedApk?>(null) }
               var importing by remember { mutableStateOf(false) }
@@ -1051,7 +1350,8 @@ jobs:
 
               fun update(s: TweakSettings) {
                   settings = s
-                  prefs.edit().putFloat("sat", s.sat).putInt("v", s.stretchV).putInt("h", s.stretchH).putInt("res", s.renderLong).apply()
+                  prefs.edit().putFloat("sat", s.sat).putInt("v", s.stretchV).putInt("h", s.stretchH).putInt("res", s.renderLong)
+                      .putBoolean("fps", s.showFps).putBoolean("unlock", s.unlock).putBoolean("timer", s.timer).putBoolean("touch", s.touchFix).apply()
               }
 
               DisposableEffect(running) {
@@ -1151,7 +1451,11 @@ jobs:
                       SectionCard("Réglages", "2") {
                           Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                               for ((name, preset) in PRESETS) {
-                                  FilterChip(selected = settings == preset, onClick = { update(preset) }, label = { Text(name) })
+                                  FilterChip(
+                                      selected = settings.core() == preset,
+                                      onClick = { update(preset.copy(showFps = settings.showFps, unlock = settings.unlock, timer = settings.timer, touchFix = settings.touchFix)) },
+                                      label = { Text(name) }
+                                  )
                               }
                           }
 
@@ -1206,6 +1510,8 @@ jobs:
                           }
                       }
 
+                      ToolsCard(settings) { update(it) }
+
                       SectionCard("Export", "3") {
                           if (!running) {
                               Button(
@@ -1255,6 +1561,8 @@ jobs:
                           }
                       }
 
+                      RecorderCard()
+
                       if (history.isNotEmpty()) {
                           SectionCard("Historique", "★") {
                               for (h in history) {
@@ -1275,9 +1583,9 @@ jobs:
                   }
               }
           }
-          FORGE_EOF_13
+          FORGE_EOF_14
           mkdir -p hook/patch
-          cat > hook/patch/TweakProvider.java <<'FORGE_EOF_14'
+          cat > hook/patch/TweakProvider.java <<'FORGE_EOF_15'
           package patch;
 
           import android.app.Activity;
@@ -1286,15 +1594,38 @@ jobs:
           import android.content.ContentValues;
           import android.content.Context;
           import android.database.Cursor;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
           import android.graphics.ColorMatrix;
           import android.graphics.ColorMatrixColorFilter;
           import android.graphics.Paint;
+          import android.graphics.Matrix;
           import android.graphics.Rect;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
           import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.Looper;
+          import android.os.SystemClock;
+          import android.text.SpannableStringBuilder;
+          import android.text.style.RelativeSizeSpan;
+          import android.view.Choreographer;
+          import android.view.Display;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.PixelCopy;
+          import android.view.Surface;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.widget.FrameLayout;
+          import android.widget.TextView;
+          import java.lang.reflect.InvocationHandler;
+          import java.lang.reflect.InvocationTargetException;
+          import java.lang.reflect.Method;
+          import java.lang.reflect.Proxy;
+          import java.util.Locale;
           import android.view.SurfaceControl;
           import android.view.SurfaceHolder;
           import android.view.SurfaceView;
@@ -1319,6 +1650,10 @@ jobs:
           public class TweakProvider extends ContentProvider {
               static float sat = 1f, sx = 1f, sy = 1f;
               static int render = 0;
+              static boolean fpsOn, unlockOn, timerOn, touchFix;
+              static final Map<Activity, Boolean> extrasDone = new WeakHashMap<Activity, Boolean>();
+              static View gameView;
+              static long resWindow = 0; static int resCount = 0;
               static final Map<View, Boolean> hooked = new WeakHashMap<View, Boolean>();
               static boolean told = false;
 
@@ -1343,6 +1678,11 @@ jobs:
                   sx = (float) j.optDouble("sx", 1.0);
                   sy = (float) j.optDouble("sy", 1.0);
                   render = j.optInt("render", 0);
+                  fpsOn = j.optInt("fps", 0) == 1;
+                  unlockOn = j.optInt("unlock", 0) == 1;
+                  timerOn = j.optInt("timer", 0) == 1;
+                  touchFix = j.optInt("touch", 0) == 1;
+                  best = c.getSharedPreferences("apkforge", Context.MODE_PRIVATE).getLong("best", 0);
               }
 
               static final class Callbacks implements Application.ActivityLifecycleCallbacks {
@@ -1390,7 +1730,9 @@ jobs:
 
               /** Applique les réglages, puis les réapplique à chaque (re)création de la surface du jeu. */
               static void attach(final Activity a, final View v) {
+                  gameView = v;
                   apply(a, v);
+                  extras(a, v);
                   if (v instanceof SurfaceView && !hooked.containsKey(v)) {
                       hooked.put(v, Boolean.TRUE);
                       ((SurfaceView) v).getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -1433,7 +1775,11 @@ jobs:
                   int th = Math.max(1, Math.round(h * f / sy));
                   if (tw >= w && th >= h) return;
                   Rect cur = sv.getHolder().getSurfaceFrame();
-                  if (cur.width() != tw || cur.height() != th) sv.getHolder().setFixedSize(tw, th);
+                  if (cur.width() == tw && cur.height() == th) return;
+                  long now = SystemClock.elapsedRealtime();
+                  if (now - resWindow > 5000) { resWindow = now; resCount = 0; }
+                  if (resCount++ >= 6) return; // évite de se battre avec le moteur du jeu
+                  sv.getHolder().setFixedSize(tw, th);
               }
 
               /** 1 = appliquée, 0 = impossible sur cet appareil, -1 = surface pas encore prête. */
@@ -1462,65 +1808,4 @@ jobs:
                   } finally {
                       t.close();
                   }
-              }
-
-              /** Petit message, une seule fois : dit si la saturation est active. */
-              static void tell(Activity a, int result) {
-                  if (told || result < 0) return;
-                  told = true;
-                  String msg = result == 1 ? "APK Forge : saturation active" : "APK Forge : saturation non prise en charge ici";
-                  Toast.makeText(a, msg, Toast.LENGTH_LONG).show();
-              }
-
-              @Override public Cursor query(Uri u, String[] p, String s, String[] a, String o) { return null; }
-              @Override public String getType(Uri u) { return null; }
-              @Override public Uri insert(Uri u, ContentValues v) { return null; }
-              @Override public int delete(Uri u, String s, String[] a) { return 0; }
-              @Override public int update(Uri u, ContentValues v, String s, String[] a) { return 0; }
-          }
-          FORGE_EOF_14
-
-      - name: Compiler le module hook en dex
-        run: |
-          set -e
-          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          AJ="$ANDROID_HOME/platforms/android-34/android.jar"
-          mkdir -p hook/cls hook/out hook/lib app/src/main/assets
-          # bibliothèque qui autorise l'appel de l'API Android cachée (filtre de couleur sur l'image du jeu)
-          curl -fL -o hook/lib/hab.aar https://repo1.maven.org/maven2/org/lsposed/hiddenapibypass/hiddenapibypass/6.1/hiddenapibypass-6.1.aar
-          unzip -o -q hook/lib/hab.aar classes.jar -d hook/lib
-          javac -XDstringConcat=inline -cp "$AJ:hook/lib/classes.jar" -d hook/cls hook/patch/TweakProvider.java
-          "$BT/d8" --release --min-api 21 --lib "$AJ" --output hook/out $(find hook/cls -name '*.class') hook/lib/classes.jar
-          cp hook/out/classes.dex app/src/main/assets/hook.dex
-
-      - name: Restaurer les clés de signature
-        uses: actions/cache@v4
-        with:
-          path: |
-            signing
-            ~/.android/debug.keystore
-          key: apkforge-keys-v1
-
-      - name: Préparer la clé qui signera les APK exportés
-        run: |
-          set -e
-          if [ ! -f signing/key.pk8 ]; then
-            mkdir -p signing
-            openssl req -x509 -newkey rsa:2048 -nodes -keyout signing/key.pem -out signing/cert.pem -days 36500 -subj "/CN=APK Forge"
-            openssl pkcs8 -topk8 -nocrypt -in signing/key.pem -outform DER -out signing/key.pk8
-            openssl x509 -in signing/cert.pem -outform DER -out signing/cert.der
-          fi
-          cp signing/key.pk8 app/src/main/assets/sign.key.pk8
-          cp signing/cert.der app/src/main/assets/sign.cert.der
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-
-      - name: Compiler l'appli
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: APK-Forge
-          path: app/build/outputs/apk/debug/app-debug.apk
+              
